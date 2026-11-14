@@ -45,7 +45,7 @@ type WorkspaceContextValue = {
   updatePdfRange: (attachmentId: string, from: number, to: number) => void;
   clearAttachments: () => void;
   contextTokens: number;
-  sendMessage: (payload: StreamPayload) => Promise<void>;
+  sendMessage: (payload: StreamPayload & { clearAttachmentsOnSend?: boolean }) => Promise<void>;
   stopStreaming: () => void;
   regenerate: () => Promise<void>;
   reset: () => void;
@@ -199,11 +199,14 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   /* --------------------------------- chat --------------------------------- */
 
   const runStream = useCallback(
-    async (payload: StreamPayload, history: ChatMessage[]) => {
+    async (payload: StreamPayload, history: ChatMessage[], clearAttachmentsAfter = false) => {
       const { prompt, mode: payloadMode, attachments: contextAttachments } = payload;
       setStatus("streaming");
       setErrorBanner(null);
       setFollowUps([]);
+      // Consume one-shot context ("analyse this once") unless the user pinned it.
+      const shouldClear = clearAttachmentsAfter && contextAttachments.length > 0;
+      if (shouldClear) setAttachments([]);
 
       const images = [...collectImages(contextAttachments), ...(payload.extraImages ?? [])];
       const enabledContext = contextAttachments.filter((a) => a.enabled && a.kind !== "image");
@@ -387,10 +390,13 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   );
 
   const sendMessage = useCallback(
-    async (payload: StreamPayload) => {
+    async (
+      payload: StreamPayload & { clearAttachmentsOnSend?: boolean },
+    ) => {
       if (status === "streaming") return;
       const history = messagesRef.current;
-      await runStream(payload, history);
+      const { clearAttachmentsOnSend = true, ...rest } = payload;
+      await runStream(rest, history, clearAttachmentsOnSend);
     },
     [runStream, status],
   );

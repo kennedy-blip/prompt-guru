@@ -4,7 +4,10 @@ import { AppShell } from "@/components/app-shell";
 import { SettingsProvider } from "@/context/settings-provider";
 import { WorkspaceProvider } from "@/context/workspace-provider";
 
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://promptguru.app";
+
 export const metadata: Metadata = {
+  metadataBase: new URL(siteUrl),
   title: "PromptGuru — AI Tech Research & Multimodal Workspace",
   description:
     "Multimodal AI research, software engineering and education workspace. Analyze codebases, parse documents, render diagrams, solve math from camera, and work hands-free with voice.",

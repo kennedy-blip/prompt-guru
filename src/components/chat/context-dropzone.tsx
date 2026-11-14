@@ -129,6 +129,12 @@ export function ContextDropzone({ children }: { children: React.ReactNode }) {
             <span className="hidden text-[10px] text-slate-500 sm:inline">ingests a whole repo</span>
           </motion.span>
         </label>
+        <span
+          title="Attachments are consumed after you send — re-attach or toggle them to keep exploring."
+          className="hidden items-center gap-1 rounded-lg border border-white/[0.07] bg-white/[0.02] px-2 py-1 text-[10px] text-slate-500 sm:flex"
+        >
+          context is one-shot → cleared after send
+        </span>
         {busy ? (
           <span className="flex items-center gap-1.5 rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-2 py-1 text-[10.5px] text-cyan-100">
             <Loader2 className="h-3 w-3 animate-spin" /> {busy}

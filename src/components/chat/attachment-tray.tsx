@@ -44,6 +44,7 @@ export function AttachmentTray() {
               )}
               <button
                 onClick={() => toggleAttachment(attachment.id)}
+                aria-pressed={attachment.enabled}
                 className="min-w-0 text-left"
                 title={`${attachment.name} — ${formatBytes(attachment.size)} (click to ${attachment.enabled ? "exclude" : "include"})`}
               >
