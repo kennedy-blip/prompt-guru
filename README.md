@@ -17,6 +17,8 @@ Research the tech world with structured briefings, scaffold entire projects and 
 | **3 · File ingestion** | Drag/drop or pick **PDF** (per-page text, page-range select), **CSV** (PapaParse: types, null rates, preview table), **JSON** (shape inference), code/images, and **whole project folders** (`webkitdirectory` + `webkitGetAsEntry`) with `node_modules`/`.git`/`dist`/binaries filtered out and a checkbox file tree + live token counter. |
 | **4 · Camera & maths** | `getUserMedia` capture with front/back switching, viewfinder grid, scan-line, **shutter flash**, rotate/zoom, upload or **paste (⌘/Ctrl+V)**. A maths system prompt enforces LaTeX transcription → numbered steps with named rules → verification → highlighted `answer` callout. |
 | **5 · Voice** | Web Speech API dictation (continuous + interim), live **Web Audio `AnalyserNode`** amplitude driving a pulse halo and frequency bars, **auto-send on silence**, and TTS read-aloud of answers. |
+| **7 · Recent chats** | Every conversation autosaves to `localStorage` (grouped Today / Yesterday / Previous 7 days). The **Recent** tab and the workspace sidebar let you reopen a thread and continue it — full message history and mode restored. |
+| **8 · Resilient engine client** | Transient failures (503 "no inference capacity", 429, network) auto-retry with exponential backoff + jitter *before* the first token. Mid-stream interruptions keep the partial answer instead of discarding it. Raw HTML 404 pages and stack traces are normalised into typed, human errors (`auth`, `capacity`, `upstream_interrupt`, `endpoint_missing`, …) with one-click **Retry** and a collapsible *engine said* detail panel. |
 | **6 · Proactive AI** | On the empty state and whenever context is added, PromptGuru analyses it and cascades **context-aware starter cards** (`staggerChildren: 0.08`); after every answer it generates **3 clickable follow-up prompts**. |
 
 ---
@@ -55,6 +57,38 @@ OPENAI_IMAGE_MODEL=
 Copy `.env.example` → `.env.local` and fill in your key.
 
 ---
+
+## 🛠 Engine resilience & error taxonomy
+
+PromptGuru never shows a raw engine payload. `/api/chat`, `/api/suggestions` and
+`/api/generate-image` all run through `normaliseEngineError()`
+(`src/lib/server/errors.ts`), which maps failures to a typed class and a short,
+actionable sentence:
+
+| Class | Trigger | What the UI does |
+| --- | --- | --- |
+| `capacity` | `503 No inference capacity available…` | auto-retries (3×, exponential backoff + jitter), then offers **Retry** |
+| `upstream_interrupt` | stream dropped mid-answer | keeps the partial answer + inline **Regenerate** |
+| `endpoint_missing` | `404` / HTML page instead of JSON | explains the route isn't deployed; image studio falls back to local SVG |
+| `auth` | `401 / 403` | opens the Connection Vault |
+| `rate_limit` / `quota` / `timeout` / `network` | as named | tailored guidance + retry where sensible |
+
+**Image generation is capability-probed.** Before generating, the studio calls
+`GET /api/generate-image`, which POSTs a tiny payload to `/images/generations` on
+the deployment. A `404` means "not deployed" and the studio says so up-front, then
+renders locally — it never surfaces the HTML 404 page.
+
+### Testing the failure paths locally
+
+```bash
+node scripts/mock-engine.mjs                 # OpenAI-compatible mock on :4010
+MOCK_MODE=capacity  PORT=4010 node scripts/mock-engine.mjs   # 503 then success
+MOCK_MODE=interrupt PORT=4010 node scripts/mock-engine.mjs   # dropped mid-stream
+MOCK_MODE=html404   PORT=4010 node scripts/mock-engine.mjs   # HTML 404 on /images
+```
+
+Point the app at it via the Connection Vault (`http://127.0.0.1:4010/v1`) to
+reproduce each case.
 
 ## 🚀 Getting started
 

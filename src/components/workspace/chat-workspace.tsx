@@ -5,11 +5,13 @@ import { ArrowDown, RotateCcw, ShieldAlert, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useWorkspace } from "@/context/workspace-provider";
 import { useSettings } from "@/context/settings-provider";
+import Link from "next/link";
 import { Composer } from "@/components/chat/composer";
 import { ContextDropzone } from "@/components/chat/context-dropzone";
 import { MessageBubble, RegenerateButton } from "@/components/chat/message-bubble";
 import { StarterCards } from "@/components/chat/starter-cards";
 import { FollowUpChips } from "@/components/chat/follow-up-chips";
+import { ErrorBanner } from "@/components/chat/error-banner";
 import { ModeSwitcher } from "@/components/chat/mode-switcher";
 import { SpringButton } from "@/components/ui/spring-button";
 import { Badge } from "@/components/ui/badge";
@@ -21,13 +23,12 @@ export function ChatWorkspace() {
     status,
     reset,
     regenerate,
-    errorBanner,
-    dismissError,
     simulated,
     lastModel,
     contextTokens,
+    sessionTitle,
   } = useWorkspace();
-  const { setOpen, hasKey } = useSettings();
+  const { hasKey } = useSettings();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pinned, setPinned] = useState(true);
 
@@ -75,38 +76,28 @@ export function ChatWorkspace() {
           </div>
         </div>
 
+        {sessionTitle && messages.length ? (
+          <div className="mb-1.5 flex items-center gap-1.5 px-1">
+            <span className="truncate text-[11px] text-slate-500" title={sessionTitle}>
+              <span className="text-slate-600">session · </span>
+              {sessionTitle}
+            </span>
+            <Link
+              href="/recent"
+              className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[10px] text-slate-500 transition hover:bg-white/5 hover:text-cyan-200"
+            >
+              all chats →
+            </Link>
+          </div>
+        ) : null}
+
         {/* conversation */}
         <div
           ref={scrollRef}
           onScroll={onScroll}
           className="relative min-h-0 flex-1 overflow-y-auto rounded-2xl border border-white/[0.06] bg-white/[0.012] px-1.5 py-2.5 sm:px-4 sm:py-3"
         >
-          <AnimatePresence>
-            {errorBanner ? (
-              <motion.div
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="mb-3 flex items-start gap-2 rounded-xl border border-amber-300/25 bg-amber-400/[0.08] p-2.5"
-              >
-                <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-[11.5px] leading-relaxed text-amber-100">{errorBanner}</p>
-                  {!hasKey ? (
-                    <button
-                      onClick={() => setOpen(true)}
-                      className="mt-1 text-[11px] font-medium text-amber-200 underline decoration-amber-300/40 underline-offset-2"
-                    >
-                      Open Connection Vault →
-                    </button>
-                  ) : null}
-                </div>
-                <button onClick={dismissError} className="text-amber-300/60 hover:text-amber-200">
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
+          <ErrorBanner />
 
           {empty ? (
             <StarterCards />

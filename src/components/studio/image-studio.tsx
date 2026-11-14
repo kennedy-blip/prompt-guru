@@ -11,7 +11,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useWorkspace } from "@/context/workspace-provider";
 import { useSettings } from "@/context/settings-provider";
 import { SpringButton } from "@/components/ui/spring-button";
@@ -19,6 +19,15 @@ import { GlassPanel } from "@/components/ui/glass-panel";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { cn, relativeTime } from "@/lib/utils";
+
+/** Never render raw HTML pages or multi-KB stack strings in the UI. */
+function sanitizeMessage(value?: string): string | undefined {
+  if (!value) return undefined;
+  if (/<[a-z][\s\S]*>/i.test(value)) {
+    return "The engine answered with a web page instead of JSON — that route does not exist on this deployment.";
+  }
+  return value.length > 300 ? `${value.slice(0, 299)}…` : value;
+}
 import type { AspectRatio, GeneratedImage } from "@/lib/types";
 
 const ASPECTS: { id: AspectRatio; label: string; box: string }[] = [
@@ -49,9 +58,35 @@ export function ImageStudio() {
   const [aspect, setAspect] = useState<AspectRatio>("1:1");
   const [enhance, setEnhance] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [localOnly, setLocalOnly] = useState(false);
+  const [capability, setCapability] = useState<
+    { imageSupported: boolean; model?: string; checked: boolean } | undefined
+  >(undefined);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<GeneratedImage | null>(null);
+
+  // Ask the server once whether this deployment exposes an image route, so the
+  // user learns it here instead of via a raw 404 page.
+  useEffect(() => {
+    let cancelled = false;
+    if (!settings.apiKey) {
+      setCapability({ imageSupported: false, checked: true });
+      return;
+    }
+    fetch("/api/generate-image", { headers: credentialHeaders(), cache: "no-store" })
+      .then((res) => res.json())
+      .then((data: { imageSupported?: boolean; model?: string }) => {
+        if (cancelled) return;
+        setCapability({ imageSupported: Boolean(data.imageSupported), model: data.model, checked: true });
+      })
+      .catch(() => {
+        if (!cancelled) setCapability({ imageSupported: false, checked: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [credentialHeaders, settings.apiKey]);
 
   const generate = useCallback(async () => {
     const clean = prompt.trim();
@@ -63,7 +98,7 @@ export function ImageStudio() {
       const response = await fetch("/api/generate-image", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...credentialHeaders() },
-        body: JSON.stringify({ prompt: clean, aspect, enhance }),
+        body: JSON.stringify({ prompt: clean, aspect, enhance, local: localOnly || undefined }),
       });
       const data = (await response.json()) as {
         id?: string;
@@ -72,14 +107,15 @@ export function ImageStudio() {
         enhancedPrompt?: string;
         source?: "model" | "synthesis";
         model?: string;
-        warning?: string;
+        notice?: string;
         error?: string;
+        errorClass?: string;
       };
       if (!response.ok || !data.url) {
-        setError(data.error ?? "Generation failed. Check your key in Settings.");
+        setError(sanitizeMessage(data.error) ?? "Generation failed. Check your key in Settings.");
         return;
       }
-      if (data.warning) setWarning(data.warning);
+      if (data.notice) setWarning(data.notice);
       addGalleryImage({
         id: data.id ?? String(Date.now()),
         prompt: data.prompt ?? clean,
@@ -180,6 +216,42 @@ export function ImageStudio() {
             checked={enhance}
             onChange={setEnhance}
           />
+
+          <Switch
+            label="Render locally (SVG)"
+            description="Skip the network image model and synthesise a deterministic poster on the server."
+            checked={localOnly}
+            onChange={setLocalOnly}
+          />
+
+          {capability?.checked ? (
+            <div
+              className={cn(
+                "flex items-start gap-2 rounded-xl border p-2.5 text-[10.5px] leading-relaxed",
+                capability.imageSupported
+                  ? "border-emerald-300/25 bg-emerald-400/[0.07] text-emerald-100"
+                  : "border-amber-300/25 bg-amber-400/[0.07] text-amber-100",
+              )}
+            >
+              <span className="mt-0.5 flex h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
+              <span>
+                {capability.imageSupported ? (
+                  <>
+                    Image route detected on this deployment
+                    {capability.model ? (
+                      <span className="ml-1 font-mono text-[10px] opacity-80">{capability.model}</span>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    This deployment exposes <span className="font-mono">no /images/generations route</span>, so
+                    every render is synthesised locally. Connect an engine with an image model for photographic
+                    output.
+                  </>
+                )}
+              </span>
+            </div>
+          ) : null}
 
           <SpringButton
             variant="primary"

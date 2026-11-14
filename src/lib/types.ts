@@ -4,6 +4,16 @@ export type ContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
 
+export type ChatErrorInfo = {
+  message: string;
+  description?: string;
+  errorClass?: string;
+  retryable?: boolean;
+  status?: number;
+  /** Sanitised raw engine text (never raw HTML). */
+  detail?: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: Role;
@@ -18,6 +28,10 @@ export type ChatMessage = {
   /** Model that produced an assistant turn. */
   model?: string;
   error?: boolean;
+  /** Structured error so the UI can offer a retry instead of raw prose. */
+  errorInfo?: ChatErrorInfo;
+  /** True when the engine dropped mid-answer and we kept the partial text. */
+  interrupted?: boolean;
 };
 
 export type AttachmentKind = "pdf" | "csv" | "json" | "code" | "image" | "text" | "folder";
@@ -100,6 +114,21 @@ export type FollowUpSuggestion = {
 
 export type StreamEvent =
   | { type: "delta"; text: string }
-  | { type: "done"; model?: string; message?: string }
-  | { type: "error"; message: string; code?: string }
+  | { type: "done"; model?: string; message?: string; interrupted?: boolean }
+  | {
+      type: "error";
+      message: string;
+      code?: string;
+      /** Longer explanation shown under the message. */
+      description?: string;
+      /** Whether a retry is likely to succeed. */
+      retryable?: boolean;
+      /** Engine error taxonomy: auth | capacity | upstream_interrupt | … */
+      errorClass?: string;
+      /** Which attempt failed, when the server auto-retried. */
+      attempt?: number;
+      /** Sanitised raw engine text for the collapsible "details" panel. */
+      detail?: string;
+    }
+  | { type: "retry"; attempt: number; waitMs: number; reason: string }
   | { type: "meta"; model?: string; simulated?: boolean };
