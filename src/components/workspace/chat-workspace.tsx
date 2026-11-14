@@ -79,7 +79,7 @@ export function ChatWorkspace() {
         <div
           ref={scrollRef}
           onScroll={onScroll}
-          className="relative min-h-0 flex-1 overflow-y-auto rounded-2xl border border-white/[0.06] bg-white/[0.012] px-2.5 py-3 sm:px-4"
+          className="relative min-h-0 flex-1 overflow-y-auto rounded-2xl border border-white/[0.06] bg-white/[0.012] px-1.5 py-2.5 sm:px-4 sm:py-3"
         >
           <AnimatePresence>
             {errorBanner ? (

@@ -9,7 +9,6 @@ import {
   CornerDownLeft,
   Mic,
   MicOff,
-  ScanText,
   Sparkles,
   Wand2,
 } from "lucide-react";
@@ -21,6 +20,7 @@ import { CameraModal, type CameraCapture } from "@/components/camera/camera-moda
 import { Tooltip } from "@/components/ui/tooltip";
 import { VoiceHalo } from "./voice-halo";
 import { AttachmentTray } from "./attachment-tray";
+import { AttachButtons } from "./context-dropzone";
 import { cn } from "@/lib/utils";
 
 const PLACEHOLDERS: Record<string, string> = {
@@ -265,13 +265,11 @@ export function Composer() {
               </span>
             ) : (
               <>
-                <span className="flex items-center gap-1 text-[10px] text-slate-500">
+                <AttachButtons />
+                <span className="hidden items-center gap-1 text-[10px] text-slate-500 sm:flex">
                   <CornerDownLeft className="h-2.5 w-2.5" /> send
                 </span>
-                <span className="flex items-center gap-1 text-[10px] text-slate-500">
-                  <ScanText className="h-2.5 w-2.5" /> shift+enter newline
-                </span>
-                <span className="flex items-center gap-1 text-[10px] text-slate-500">
+                <span className="hidden items-center gap-1 text-[10px] text-slate-500 lg:flex">
                   <Wand2 className="h-2.5 w-2.5" /> ⌘K focus
                 </span>
                 {settings.previewMode ? (
