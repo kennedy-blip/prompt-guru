@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { credentialsSummary, resolveCredentials } from "@/lib/server/credentials";
 import { createClient } from "@/lib/server/openai";
+import { normaliseEngineError } from "@/lib/server/errors";
 import { offlineReply } from "@/lib/server/offline";
 import { SSE_HEADERS, sse } from "@/lib/server/stream";
 import { systemPromptForMode } from "@/lib/prompts";
@@ -28,6 +29,7 @@ type ChatBody = {
 };
 
 const FALLBACK_ENABLED = () => process.env.JULES_LLM_FALLBACK === "true";
+const MAX_ATTEMPTS = 3;
 
 function toOpenAIMessages(messages: IncomingMessage[]): ChatCompletionMessageParam[] {
   return messages.map((message) => {
@@ -87,14 +89,14 @@ export async function POST(req: NextRequest) {
 
   // Explicit offline demo request from the client (Preview mode toggle).
   if (body.demo) {
-    const text = offlineReply(mode, lastUserText(messages), attachments);
-    return new Response(streamText(text), { headers: SSE_HEADERS });
+    return new Response(streamText(offlineReply(mode, lastUserText(messages), attachments)), {
+      headers: SSE_HEADERS,
+    });
   }
 
   const creds = resolveCredentials(req.headers);
 
   if (!creds.apiKey) {
-    // No key anywhere → instruct the UI to open the Settings vault (HTTP 401).
     if (!FALLBACK_ENABLED()) {
       return Response.json(
         {
@@ -105,8 +107,9 @@ export async function POST(req: NextRequest) {
         { status: 401 },
       );
     }
-    const text = offlineReply(mode, lastUserText(messages), attachments);
-    return new Response(streamText(text), { headers: SSE_HEADERS });
+    return new Response(streamText(offlineReply(mode, lastUserText(messages), attachments)), {
+      headers: SSE_HEADERS,
+    });
   }
 
   const client = createClient(creds);
@@ -117,56 +120,120 @@ export async function POST(req: NextRequest) {
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (event: Parameters<typeof sse>[0]) => controller.enqueue(sse(event));
+      let closed = false;
+      const send = (event: Parameters<typeof sse>[0]) => {
+        if (closed) return;
+        try {
+          controller.enqueue(sse(event));
+        } catch {
+          closed = true;
+        }
+      };
+      const finish = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          /* already closed by the runtime */
+        }
+      };
+
       send({ type: "meta", model: creds.model, simulated: false });
 
-      try {
-        const completion = await client.chat.completions.create({
-          model: creds.model,
-          messages: payloadMessages,
-          temperature: body.temperature ?? 0.6,
-          max_tokens: body.maxTokens ?? 4096,
-          stream: true,
-        });
+      let accumulated = "";
+      let emitted = false;
 
-        for await (const chunk of completion) {
-          const delta = chunk.choices?.[0]?.delta?.content;
-          if (delta) send({ type: "delta", text: delta });
+      try {
+        // Retry transient failures (503 capacity, 429) *before* any token is
+        // emitted. Once the first token is on the wire we must never replay the
+        // request — that would duplicate the partial answer in the transcript.
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+          try {
+            const completion = await client.chat.completions.create({
+              model: creds.model,
+              messages: payloadMessages,
+              temperature: body.temperature ?? 0.6,
+              max_tokens: body.maxTokens ?? 4096,
+              stream: true,
+            });
+
+            for await (const chunk of completion) {
+              const delta = chunk.choices?.[0]?.delta?.content;
+              if (delta) {
+                if (!emitted) emitted = true;
+                accumulated += delta;
+                send({ type: "delta", text: delta });
+              }
+            }
+            break; // stream completed cleanly
+          } catch (attemptError) {
+            const normalised = normaliseEngineError(attemptError);
+            const canRetry = normalised.retryable && attempt < MAX_ATTEMPTS && !emitted;
+            if (!canRetry) throw attemptError;
+            const waitMs = Math.round(800 * Math.pow(2, attempt - 1) * (0.75 + Math.random() * 0.5));
+            send({
+              type: "retry",
+              attempt: attempt + 1,
+              waitMs,
+              reason: normalised.message,
+            });
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+          }
         }
+
         send({ type: "done", model: creds.model });
-        controller.close();
+        finish();
         return;
       } catch (error) {
-        const err = error as { message?: string; status?: number; code?: string };
-        const allowFallback = FALLBACK_ENABLED();
-        if (allowFallback) {
+        const normalised = normaliseEngineError(error);
+
+        // Partial answer survives an interrupted stream — never discard it.
+        if (accumulated.trim().length > 0) {
           send({
             type: "error",
-            message: `TransJules request failed (${err.message ?? "unknown"}). Showing offline preview.`,
-            code: "fallback",
+            message: normalised.message,
+            description: `${normalised.description}`,
+            code: "upstream_interrupt",
+            errorClass: "upstream_interrupt",
+            retryable: true,
           });
-          const text = offlineReply(mode, lastUserText(messages), attachments);
-          for (const chunk of text.match(/[\s\S]{1,18}/g) ?? []) {
+          send({ type: "done", model: creds.model, interrupted: true, message: "partial" });
+          finish();
+          return;
+        }
+
+        if (FALLBACK_ENABLED()) {
+          send({
+            type: "error",
+            message: `${normalised.message} Showing offline preview instead.`,
+            code: "fallback",
+            errorClass: normalised.className,
+          });
+          for (const chunk of offlineReply(mode, lastUserText(messages), attachments).match(/[\s\S]{1,18}/g) ?? []) {
             send({ type: "delta", text: chunk });
             await new Promise((r) => setTimeout(r, 12));
           }
           send({ type: "done", message: "offline-preview" });
-          controller.close();
+          finish();
           return;
         }
+
         send({
           type: "error",
-          message:
-            err.status === 401 || err.status === 403
-              ? `The engine rejected the API key (${err.status}). Check it in Settings → Connection Vault.`
-              : err.message || "The inference engine could not be reached.",
-          code: err.code ?? String(err.status ?? "engine_error"),
+          message: normalised.message,
+          description: normalised.description,
+          code: normalised.className === "auth" ? "missing_credentials" : normalised.className,
+          errorClass: normalised.className,
+          retryable: normalised.retryable,
+          detail: normalised.detail,
         });
-        controller.close();
+        send({ type: "done", message: "error" });
+        finish();
       }
     },
     cancel() {
-      // Client aborted — stream teardown handled by the runtime.
+      // Client aborted (stop button) — nothing to clean up beyond the runtime.
     },
   });
 

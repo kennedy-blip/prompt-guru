@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import type {
+  ChatErrorInfo,
   ChatMessage,
   FollowUpSuggestion,
   GeneratedImage,
@@ -20,6 +21,7 @@ import type {
 import { collectImages, totalTokens } from "@/lib/parsers";
 import { estimateTokens, uid } from "@/lib/utils";
 import { useSettings } from "./settings-provider";
+import { saveSession } from "@/lib/history";
 
 type ChatStatus = "idle" | "streaming" | "error";
 
@@ -46,6 +48,7 @@ type WorkspaceContextValue = {
   clearAttachments: () => void;
   contextTokens: number;
   sendMessage: (payload: StreamPayload & { clearAttachmentsOnSend?: boolean }) => Promise<void>;
+  loadSession: (session: { id: string; mode: ModeId; messages: ChatMessage[]; title: string; model?: string }) => void;
   stopStreaming: () => void;
   regenerate: () => Promise<void>;
   reset: () => void;
@@ -53,15 +56,38 @@ type WorkspaceContextValue = {
   startersLoading: boolean;
   followUps: FollowUpSuggestion[];
   followUpsLoading: boolean;
+  refreshFollowUps: () => Promise<void>;
   refreshStarters: () => Promise<void>;
   gallery: GeneratedImage[];
   addGalleryImage: (image: GeneratedImage) => void;
   removeGalleryImage: (id: string) => void;
   errorBanner: string | null;
+  /** Full structured banner (message + description + retry affordance). */
+  errorInfo: ChatErrorInfo | null;
   dismissError: () => void;
+  retryLast: () => Promise<void>;
+  /** Live "retrying (2/3) in 900ms" notice. */
+  retryNotice: string | null;
   lastModel: string | null;
   simulated: boolean;
+  /** Persisted conversation id (for the Recent tab). */
+  sessionId: string | null;
+  sessionTitle: string;
 };
+
+/** Defensive: strip any HTML/markup the engine might have leaked into a message. */
+function clean(value?: string): string | undefined {
+  if (!value) return undefined;
+  if (!/<[a-z][\s\S]*>/i.test(value) && value.length < 300) return value;
+  const stripped = value
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!stripped) return "The engine returned an unreadable response.";
+  return stripped.length > 220 ? `${stripped.slice(0, 219).trimEnd()}…` : stripped;
+}
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 
@@ -77,13 +103,19 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   const [followUpsLoading, setFollowUpsLoading] = useState(false);
   const [gallery, setGallery] = useState<GeneratedImage[]>([]);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [errorInfo, setErrorInfo] = useState<ChatErrorInfo | null>(null);
+  const [retryNotice, setRetryNotice] = useState<string | null>(null);
   const [lastModel, setLastModel] = useState<string | null>(null);
   const [simulated, setSimulated] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionTitle, setSessionTitle] = useState<string>("");
 
   const abortRef = useRef<AbortController | null>(null);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const startersKeyRef = useRef<string>("");
+  const sessionIdRef = useRef<string | null>(null);
+  const lastPayloadRef = useRef<(StreamPayload & { clearAttachmentsOnSend?: boolean }) | null>(null);
 
   const contextTokens = useMemo(() => totalTokens(attachments), [attachments]);
 
@@ -97,8 +129,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
           headers: { "Content-Type": "application/json", ...credentialHeaders() },
           body: JSON.stringify({ kind, mode, ...body }),
         });
-        if (!res.ok) return [];
-        const data = (await res.json()) as { items?: FollowUpSuggestion[] };
+        const data = (await res.json().catch(() => ({}))) as { items?: FollowUpSuggestion[] };
         return data.items ?? [];
       } catch {
         return [];
@@ -196,6 +227,23 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
 
   const clearAttachments = useCallback(() => setAttachments([]), []);
 
+  /** Re-generate follow-ups for the latest completed exchange (user-invoked). */
+  const refreshFollowUps = useCallback(async () => {
+    const thread = messagesRef.current;
+    const lastAssistant = [...thread].reverse().find((m) => m.role === "assistant" && m.content.trim());
+    if (!lastAssistant) return;
+    const idx = thread.indexOf(lastAssistant);
+    const question = [...thread.slice(0, idx)].reverse().find((m) => m.role === "user")?.content ?? "";
+    setFollowUpsLoading(true);
+    const items = await fetchSuggestions("followup", {
+      question,
+      answer: lastAssistant.content,
+      attachments: attachments.map((a) => a.name),
+    });
+    setFollowUps(items);
+    setFollowUpsLoading(false);
+  }, [attachments, fetchSuggestions]);
+
   /* --------------------------------- chat --------------------------------- */
 
   const runStream = useCallback(
@@ -203,7 +251,10 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       const { prompt, mode: payloadMode, attachments: contextAttachments } = payload;
       setStatus("streaming");
       setErrorBanner(null);
+      setErrorInfo(null);
+      setRetryNotice(null);
       setFollowUps([]);
+      setFollowUpsLoading(false);
       // Consume one-shot context ("analyse this once") unless the user pinned it.
       const shouldClear = clearAttachmentsAfter && contextAttachments.length > 0;
       if (shouldClear) setAttachments([]);
@@ -233,9 +284,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         content: string;
         images?: string[];
       }[] = [
-        ...history
-          .filter((m) => !m.error)
-          .map((m) => ({ role: m.role, content: m.content })),
+        ...history.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content })),
         { role: "user" as const, content: prompt, images },
       ];
 
@@ -251,6 +300,9 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
 
       const controller = new AbortController();
       abortRef.current = controller;
+
+      const patchAssistant = (patch: Partial<ChatMessage>) =>
+        setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)));
 
       try {
         const response = await fetch("/api/chat", {
@@ -271,23 +323,33 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         if (response.status === 401) {
           const data = (await response.json().catch(() => ({}))) as { error?: string };
           setMessages((prev) => prev.filter((m) => m.id !== assistantId));
-          setErrorBanner(
-            data.error ??
-              "No API key configured. Open Settings → Connection Vault and add your TransJules key.",
-          );
+          const info: ChatErrorInfo = {
+            message: "No TransJules API key configured.",
+            description:
+              data.error ?? "Open Settings → Connection Vault and add your key to go live.",
+            errorClass: "auth",
+            retryable: false,
+            status: 401,
+          };
+          setErrorInfo(info);
+          setErrorBanner(info.message);
           setStatus("error");
           return;
         }
 
         if (!response.ok || !response.body) {
           const data = (await response.json().catch(() => ({}))) as { error?: string };
+          const info: ChatErrorInfo = {
+            message: clean(data.error) || "The engine returned an error.",
+            errorClass: "unknown",
+            retryable: response.status >= 500,
+            status: response.status,
+          };
           setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId
-                ? { ...m, content: data.error ?? "The engine returned an error.", error: true }
-                : m,
-            ),
+            prev.map((m) => (m.id === assistantId ? { ...m, content: info.message, error: true, errorInfo: info } : m)),
           );
+          setErrorInfo(info);
+          setErrorBanner(info.message);
           setStatus("error");
           return;
         }
@@ -297,6 +359,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         let buffer = "";
         let accumulated = "";
         let model: string | undefined;
+        let failed = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -319,42 +382,55 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
 
             if (event.type === "delta") {
               accumulated += event.text;
-              setMessages((prev) =>
-                prev.map((m) => (m.id === assistantId ? { ...m, content: accumulated } : m)),
-              );
+              patchAssistant({ content: accumulated });
             } else if (event.type === "meta") {
               model = event.model;
               if (event.simulated) setSimulated(true);
               if (event.model) {
                 setLastModel(event.model);
-                setMessages((prev) =>
-                  prev.map((m) => (m.id === assistantId ? { ...m, model: event.model } : m)),
-                );
+                patchAssistant({ model: event.model });
               }
+            } else if (event.type === "retry") {
+              setRetryNotice(
+                `Engine busy — retrying (attempt ${event.attempt} of 3) in ${Math.round(event.waitMs / 100) / 10}s…`,
+              );
             } else if (event.type === "error") {
+              const info: ChatErrorInfo = {
+                message: clean(event.message) || "The engine returned an error.",
+                description: clean(event.description),
+                errorClass: event.errorClass ?? event.code,
+                retryable: event.retryable ?? true,
+                detail: clean(event.detail),
+              };
               if (event.code === "fallback") {
-                setErrorBanner(event.message);
                 setSimulated(true);
+                setErrorInfo(info);
+                setErrorBanner(info.message);
+              } else if (accumulated.trim()) {
+                // Interrupted mid-answer: keep the partial text and flag it.
+                patchAssistant({ interrupted: true, errorInfo: info });
+                setErrorInfo(info);
+                setErrorBanner(info.message);
               } else {
-                setErrorBanner(event.message);
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === assistantId && !accumulated
-                      ? { ...m, content: event.message, error: true }
-                      : m,
-                  ),
-                );
+                failed = true;
+                patchAssistant({ content: info.message, error: true, errorInfo: info });
+                setErrorInfo(info);
+                setErrorBanner(info.message);
               }
+              setRetryNotice(null);
             } else if (event.type === "done") {
               if (event.message === "offline-preview") setSimulated(true);
+              if (event.interrupted) patchAssistant({ interrupted: true });
+              setRetryNotice(null);
             }
           }
         }
 
-        setStatus("idle");
+        setStatus(failed ? "error" : "idle");
+        setRetryNotice(null);
         if (model) setLastModel(model);
 
-        // Generate proactive follow-ups after every completed answer.
+        // Proactive follow-ups after any completed answer (including partial ones).
         if (accumulated.trim()) {
           setFollowUpsLoading(true);
           const items = await fetchSuggestions("followup", {
@@ -364,26 +440,33 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
           });
           setFollowUps(items);
           setFollowUpsLoading(false);
+        } else {
+          setFollowUpsLoading(false);
         }
       } catch (error) {
         if ((error as Error).name === "AbortError") {
           setStatus("idle");
           return;
         }
+        const info: ChatErrorInfo = {
+          message: "Network error.",
+          description: "PromptGuru could not reach its own API route — check your connection and retry.",
+          errorClass: "network",
+          retryable: true,
+        };
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
-              ? {
-                  ...m,
-                  content: m.content || "Network error — the workspace could not reach the API route.",
-                  error: true,
-                }
+              ? { ...m, content: m.content || info.message!, error: true, errorInfo: info }
               : m,
           ),
         );
+        setErrorInfo(info);
+        setErrorBanner(info.message);
         setStatus("error");
       } finally {
         abortRef.current = null;
+        setRetryNotice(null);
       }
     },
     [credentialHeaders, fetchSuggestions, settings.previewMode, settings.temperature],
@@ -394,12 +477,34 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       payload: StreamPayload & { clearAttachmentsOnSend?: boolean },
     ) => {
       if (status === "streaming") return;
+      lastPayloadRef.current = payload;
+      if (!sessionIdRef.current) {
+        const id = uid("chat");
+        sessionIdRef.current = id;
+        setSessionId(id);
+      }
       const history = messagesRef.current;
       const { clearAttachmentsOnSend = true, ...rest } = payload;
       await runStream(rest, history, clearAttachmentsOnSend);
     },
     [runStream, status],
   );
+
+  /** One-click retry of the exact previous request (after a capacity/stream error). */
+  const retryLast = useCallback(async () => {
+    const payload = lastPayloadRef.current;
+    if (!payload || status === "streaming") return;
+    // Drop the trailing failed exchange before replaying so we don't duplicate it.
+    const history = messagesRef.current;
+    const lastUserIdx = [...history].reverse().findIndex((m) => m.role === "user");
+    const trimmed = lastUserIdx === -1 ? history : history.slice(0, history.length - 1 - lastUserIdx);
+    if (trimmed !== history) setMessages(trimmed);
+    setErrorBanner(null);
+    setErrorInfo(null);
+    const { clearAttachmentsOnSend: _ignored, ...rest } = payload;
+    void _ignored;
+    await runStream(rest, trimmed, false);
+  }, [runStream, status]);
 
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort();
@@ -426,15 +531,62 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     );
   }, [attachments, mode, runStream]);
 
+  /** Restore a stored conversation so the user can continue it. */
+  const loadSession = useCallback(
+    (session: { id: string; mode: ModeId; messages: ChatMessage[]; title: string; model?: string }) => {
+      abortRef.current?.abort();
+      sessionIdRef.current = session.id;
+      setSessionId(session.id);
+      setSessionTitle(session.title);
+      setMode(session.mode);
+      setMessages(session.messages);
+      setAttachments([]);
+      setFollowUps([]);
+      setFollowUpsLoading(false);
+      setStatus("idle");
+      setErrorBanner(null);
+      setErrorInfo(null);
+      setRetryNotice(null);
+      setSimulated(false);
+      if (session.model) setLastModel(session.model);
+      startersKeyRef.current = "loaded";
+    },
+    [],
+  );
+
   const reset = useCallback(() => {
     abortRef.current?.abort();
     setMessages([]);
     setFollowUps([]);
     setStatus("idle");
     setErrorBanner(null);
+    setErrorInfo(null);
+    setRetryNotice(null);
     setSimulated(false);
+    setSessionId(null);
+    setSessionTitle("");
+    sessionIdRef.current = null;
+    lastPayloadRef.current = null;
     startersKeyRef.current = "";
   }, []);
+
+  /* -------------------------------- autosave ------------------------------ */
+
+  // Persist the thread whenever it settles (never mid-stream).
+  useEffect(() => {
+    if (status === "streaming") return;
+    if (!messages.length) return;
+    if (!sessionId) return;
+    const settled = messages.filter((m) => m.role === "user" || m.content.trim());
+    if (!settled.length) return;
+    const record = saveSession({
+      id: sessionId,
+      mode,
+      messages: settled,
+      model: lastModel ?? undefined,
+    });
+    if (record) setSessionTitle(record.title);
+  }, [messages, status, sessionId, mode, lastModel]);
 
   /* -------------------------------- gallery ------------------------------- */
 
@@ -461,6 +613,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       clearAttachments,
       contextTokens,
       sendMessage,
+      loadSession,
       stopStreaming,
       regenerate,
       reset,
@@ -468,14 +621,23 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       startersLoading,
       followUps,
       followUpsLoading,
+      refreshFollowUps,
       refreshStarters,
       gallery,
       addGalleryImage,
       removeGalleryImage,
       errorBanner,
-      dismissError: () => setErrorBanner(null),
+      errorInfo,
+      dismissError: () => {
+        setErrorBanner(null);
+        setErrorInfo(null);
+      },
+      retryLast,
+      retryNotice,
       lastModel,
       simulated,
+      sessionId,
+      sessionTitle,
     }),
     [
       messages,
@@ -490,6 +652,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       clearAttachments,
       contextTokens,
       sendMessage,
+      loadSession,
       stopStreaming,
       regenerate,
       reset,
@@ -497,13 +660,19 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       startersLoading,
       followUps,
       followUpsLoading,
+      refreshFollowUps,
       refreshStarters,
       gallery,
       addGalleryImage,
       removeGalleryImage,
       errorBanner,
+      errorInfo,
+      retryLast,
+      retryNotice,
       lastModel,
       simulated,
+      sessionId,
+      sessionTitle,
     ],
   );
 

@@ -9,6 +9,7 @@ import {
   Camera,
   Command,
   GitBranch,
+  History,
   Image as ImageIcon,
   Menu,
   PanelRightOpen,
@@ -29,6 +30,8 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { Badge } from "@/components/ui/badge";
 import { SettingsDrawer } from "@/components/settings/settings-drawer";
 import { ContextPanel } from "@/components/workspace/context-panel";
+import { SessionList } from "@/components/history/recent-sessions";
+import { GlassPanel } from "@/components/ui/glass-panel";
 import { useSpeechSynthesis } from "@/hooks/use-speech-synthesis";
 
 const NAV = [
@@ -36,6 +39,7 @@ const NAV = [
   { href: "/studio", label: "Image Studio", icon: ImageIcon },
   { href: "/camera", label: "Vision", icon: Camera },
   { href: "/library", label: "Library", icon: BookOpenCheck },
+  { href: "/recent", label: "Recent", icon: History },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -232,8 +236,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="mx-auto flex w-full max-w-[1680px] flex-1 gap-4 px-2 py-3 sm:px-4">
           <main className="min-w-0 flex-1">{children}</main>
           <aside className="hidden w-[330px] shrink-0 xl:block">
-            <div className="sticky top-[4.5rem] max-h-[calc(100vh-5.5rem)] overflow-y-auto scrollbar-none">
+            <div className="sticky top-[4.5rem] max-h-[calc(100vh-5.5rem)] space-y-3 overflow-y-auto scrollbar-none">
               <ContextPanel />
+              <GlassPanel className="p-3">
+                <SessionList compact />
+              </GlassPanel>
             </div>
           </aside>
         </div>

@@ -22,6 +22,7 @@ import { useSpeechSynthesis } from "@/hooks/use-speech-synthesis";
 import { extractScaffold } from "@/lib/scaffold";
 import { cn } from "@/lib/utils";
 import { ExportZipButton } from "./export-zip-button";
+import { InterruptedNotice } from "./error-banner";
 
 export function MessageBubble({
   message,
@@ -127,6 +128,11 @@ export function MessageBubble({
               <AlertTriangle className="h-3.5 w-3.5" /> Request failed
             </p>
             <p className="mt-1 leading-relaxed text-rose-100/80">{message.content}</p>
+            {message.errorInfo?.description ? (
+              <p className="mt-1.5 border-t border-rose-300/15 pt-1.5 text-[11px] leading-relaxed text-rose-200/70">
+                {message.errorInfo.description}
+              </p>
+            ) : null}
           </div>
         ) : (
           <div className="relative rounded-2xl rounded-tl-md border border-white/[0.07] bg-white/[0.022] px-3.5 py-2.5">
@@ -136,6 +142,8 @@ export function MessageBubble({
             ) : null}
           </div>
         )}
+
+        {message.interrupted ? <InterruptedNotice info={message.errorInfo} /> : null}
 
         <div className="mt-1.5 flex flex-wrap items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
           <Tooltip label={copied ? "Copied" : "Copy answer"}>
